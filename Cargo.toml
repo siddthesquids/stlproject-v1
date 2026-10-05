@@ -1,27 +1,14 @@
 [package]
-name = "stl_analyzer"
+name = "stl-analyzer"
 version = "0.1.0"
 edition = "2021"
-description = "Console tool that loads STL files and reports mesh quality problems"
-
-[lib]
-name = "stl_analyzer"
-path = "src/lib.rs"
-
-[[bin]]
-name = "stl-analyzer"
-path = "src/main.rs"
 
 [dependencies]
-# none: the project only uses the Rust standard library
 
-[[example]]
-name = "make_sample"
-path = "examples/make_sample.rs"
+[[bin]]
+name = "stl-generator"
+path = "src/bin/stl_generator.rs"
 
-[[example]]
-name = "benchmark"
-path = "examples/benchmark.rs"
-
-[profile.release]
-opt-level = 3
+[[bin]]
+name = "render-guide"
+path = "src/bin/render_guide.rs"

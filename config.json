@@ -1,0 +1,7 @@
+{
+  "stl_folder": "stl_files",
+  "sliver_aspect_ratio": 20.0,
+  "micro_triangle_area_ratio": 1e-8,
+  "large_triangle_area_ratio": 0.25,
+  "max_incident_edges": 12
+}

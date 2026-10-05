@@ -1,11 +1,12 @@
 use std::env;
 use std::process::ExitCode;
 
-use stl_analyzer::samples::{write_varied_binary_stl, DEFAULT_SAMPLE_TRIANGLES};
+use stl_analyzer::samples::{generate, SampleKind};
+use stl_analyzer::stl::write_binary;
 
 fn main() -> ExitCode {
     let path = env::args().nth(1).unwrap_or_else(|| "sample.stl".into());
-    let triangle_count = match env::args().nth(2) {
+    let density = match env::args().nth(2) {
         Some(value) => match value.parse::<u32>() {
             Ok(count) => count,
             Err(error) => {
@@ -13,12 +14,16 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
         },
-        None => DEFAULT_SAMPLE_TRIANGLES,
+        None => 24,
     };
 
-    match write_varied_binary_stl(&path, triangle_count) {
+    let triangles = generate(SampleKind::Torus, density as usize);
+    match std::fs::File::create(&path)
+        .map_err(stl_analyzer::stl::StlError::from)
+        .and_then(|mut file| write_binary(&mut file, "torus", &triangles))
+    {
         Ok(()) => {
-            println!("Wrote {path} with {triangle_count} triangles");
+            println!("Wrote {path} with {} triangles", triangles.len());
             ExitCode::SUCCESS
         }
         Err(error) => {

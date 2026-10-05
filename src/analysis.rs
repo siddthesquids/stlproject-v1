@@ -1,172 +1,170 @@
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use crate::geometry::{Mesh, Vec3};
 
-use crate::geometry::Vec3;
-use crate::mesh::Mesh;
-
-const TOP_VERTEX_COUNT: usize = 10;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Bounds {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoundingBox {
     pub min: Vec3,
     pub max: Vec3,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct TriangleSizeCounts {
-    pub sliver: usize,
-    pub medium: usize,
-    pub large: usize,
-    pub extremely_large: usize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct VertexIncidence {
-    pub position: Vec3,
-    pub edge_count: usize,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct AnalysisReport {
-    pub triangle_count: usize,
-    pub surface_area: f64,
-    pub degenerate_triangles: usize,
-    pub bounds: Option<Bounds>,
-    pub triangle_sizes: TriangleSizeCounts,
-    pub high_incidence_vertices: Vec<VertexIncidence>,
-}
-
-pub fn analyze(mesh: &Mesh) -> AnalysisReport {
-    let mut surface_area = 0.0;
-    let mut degenerate_triangles = 0;
-    let mut triangle_sizes = TriangleSizeCounts::default();
-    for triangle in mesh.triangles() {
-        let area = triangle.area();
-        surface_area += area;
-        if area <= f64::EPSILON {
-            degenerate_triangles += 1;
+impl BoundingBox {
+    pub fn from_vertices(vertices: &[Vec3]) -> Option<Self> {
+        let first = *vertices.first()?;
+        let mut bounds = Self {
+            min: first,
+            max: first,
+        };
+        for &vertex in &vertices[1..] {
+            bounds.min.x = bounds.min.x.min(vertex.x);
+            bounds.min.y = bounds.min.y.min(vertex.y);
+            bounds.min.z = bounds.min.z.min(vertex.z);
+            bounds.max.x = bounds.max.x.max(vertex.x);
+            bounds.max.y = bounds.max.y.max(vertex.y);
+            bounds.max.z = bounds.max.z.max(vertex.z);
         }
-        classify_triangle(*triangle, area, &mut triangle_sizes);
+        Some(bounds)
     }
 
-    let bounds = mesh.bounds().map(|(min, max)| Bounds { min, max });
-    let high_incidence_vertices = measure_vertex_edge_degrees(mesh);
-
-    AnalysisReport {
-        triangle_count: mesh.len(),
-        surface_area,
-        degenerate_triangles,
-        bounds,
-        triangle_sizes,
-        high_incidence_vertices,
+    pub fn diagonal_squared(self) -> f32 {
+        let delta = self.max - self.min;
+        delta.dot(delta)
     }
 }
 
-fn classify_triangle(
-    triangle: crate::geometry::Triangle,
-    area: f64,
-    counts: &mut TriangleSizeCounts,
-) {
-    let [a, b, c] = triangle.vertices;
-    let longest_edge = (b - a).length().max((c - b).length()).max((a - c).length());
-    if longest_edge > 0.0 && area / (longest_edge * longest_edge) < 0.01 {
-        counts.sliver += 1;
-    } else if longest_edge < 10.0 {
-        counts.medium += 1;
-    } else if longest_edge < 1_000.0 {
-        counts.large += 1;
-    } else {
-        counts.extremely_large += 1;
+#[derive(Debug, Clone, Copy)]
+pub struct Thresholds {
+    pub sliver_aspect_ratio: f32,
+    pub micro_triangle_area_ratio: f32,
+    pub large_triangle_area_ratio: f32,
+    pub max_incident_edges: usize,
+}
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        Self {
+            sliver_aspect_ratio: 20.0,
+            micro_triangle_area_ratio: 1.0e-8,
+            large_triangle_area_ratio: 0.25,
+            max_incident_edges: 12,
+        }
     }
 }
 
-fn measure_vertex_edge_degrees(mesh: &Mesh) -> Vec<VertexIncidence> {
-    let mut vertex_indices = HashMap::<VertexKey, u32>::new();
-    let mut vertex_positions = Vec::new();
-    let mut edge_counts = Vec::<usize>::new();
-    let mut edges = HashSet::<(u32, u32)>::new();
+#[derive(Debug)]
+pub struct SliverTriangle {
+    pub triangle: usize,
+    pub area: f32,
+    pub aspect_ratio: f32,
+}
+#[derive(Debug)]
+pub struct LargeTriangle {
+    pub triangle: usize,
+    pub area: f32,
+    pub relative_area: f32,
+}
+#[derive(Debug)]
+pub struct MicroTriangle {
+    pub triangle: usize,
+    pub area: f32,
+    pub relative_area: f32,
+}
+#[derive(Debug)]
+pub struct HighIncidentVertex {
+    pub vertex: usize,
+    pub position: Vec3,
+    pub incident_edges: usize,
+}
 
-    for triangle in mesh.triangles() {
-        let [a, b, c] = triangle.vertices;
-        let indices = [a, b, c].map(|position| {
-            let key = VertexKey::from(position);
-            let next_index = vertex_positions.len() as u32;
-            *vertex_indices.entry(key).or_insert_with(|| {
-                vertex_positions.push(position);
-                edge_counts.push(0);
-                next_index
-            })
-        });
+#[derive(Debug)]
+pub struct Analysis {
+    pub bounds: Option<BoundingBox>,
+    pub slivers: Vec<SliverTriangle>,
+    pub micro_triangles: Vec<MicroTriangle>,
+    pub large_triangles: Vec<LargeTriangle>,
+    pub high_incident_vertices: Vec<HighIncidentVertex>,
+}
 
-        for (left, right) in [
-            (indices[0], indices[1]),
-            (indices[1], indices[2]),
-            (indices[2], indices[0]),
-        ] {
-            let edge = if left <= right {
-                (left, right)
-            } else {
-                (right, left)
-            };
-            if edges.insert(edge) {
-                edge_counts[left as usize] += 1;
-                edge_counts[right as usize] += 1;
+pub fn analyze(mesh: &Mesh, thresholds: Thresholds) -> Analysis {
+    let bounds = BoundingBox::from_vertices(&mesh.vertices);
+    let model_area = bounds.map_or(0.0, BoundingBox::diagonal_squared);
+    let mut slivers = Vec::new();
+    let mut micro_triangles = Vec::new();
+    let mut large_triangles = Vec::new();
+    let mut edges = Vec::with_capacity(mesh.triangles.len().saturating_mul(3));
+
+    for (index, indexed) in mesh.triangles.iter().enumerate() {
+        let [a, b, c] = indexed.indices;
+        let vertices = [mesh.vertices[a], mesh.vertices[b], mesh.vertices[c]];
+        let area = 0.5
+            * (vertices[1] - vertices[0])
+                .cross(vertices[2] - vertices[0])
+                .length();
+        let longest = vertices[0]
+            .distance(vertices[1])
+            .max(vertices[1].distance(vertices[2]))
+            .max(vertices[2].distance(vertices[0]));
+        let aspect_ratio = if area > 0.0 {
+            longest * longest / (2.0 * area)
+        } else {
+            f32::INFINITY
+        };
+        if aspect_ratio >= thresholds.sliver_aspect_ratio {
+            slivers.push(SliverTriangle {
+                triangle: index,
+                area,
+                aspect_ratio,
+            });
+        }
+        if area == 0.0
+            || (model_area > 0.0 && area / model_area <= thresholds.micro_triangle_area_ratio)
+        {
+            micro_triangles.push(MicroTriangle {
+                triangle: index,
+                area,
+                relative_area: if model_area > 0.0 {
+                    area / model_area
+                } else {
+                    0.0
+                },
+            });
+        }
+        if model_area > 0.0 && area / model_area >= thresholds.large_triangle_area_ratio {
+            large_triangles.push(LargeTriangle {
+                triangle: index,
+                area,
+                relative_area: area / model_area,
+            });
+        }
+        for (start, end) in [(a, b), (b, c), (c, a)] {
+            if start != end {
+                edges.push((start.min(end), start.max(end)));
             }
         }
     }
 
-    let mut top = BinaryHeap::<Reverse<(usize, usize)>>::with_capacity(TOP_VERTEX_COUNT);
-    for (index, &edge_count) in edge_counts.iter().enumerate() {
-        let candidate = Reverse((edge_count, index));
-        if top.len() < TOP_VERTEX_COUNT {
-            top.push(candidate);
-        } else if top.peek().is_some_and(|smallest| candidate > *smallest) {
-            top.pop();
-            top.push(candidate);
-        }
+    // Sorting compact edge pairs avoids a hash set per vertex while counting unique neighbors.
+    edges.sort_unstable();
+    edges.dedup();
+    let mut degrees = vec![0_usize; mesh.vertices.len()];
+    for (a, b) in edges {
+        degrees[a] += 1;
+        degrees[b] += 1;
     }
-
-    let mut result: Vec<_> = top
+    let high_incident_vertices = degrees
         .into_iter()
-        .map(|Reverse((edge_count, index))| VertexIncidence {
-            position: vertex_positions[index],
-            edge_count,
+        .enumerate()
+        .filter_map(|(vertex, incident_edges)| {
+            (incident_edges > thresholds.max_incident_edges).then(|| HighIncidentVertex {
+                vertex,
+                position: mesh.vertices[vertex],
+                incident_edges,
+            })
         })
         .collect();
-    result.sort_unstable_by(|left, right| right.edge_count.cmp(&left.edge_count));
-    result
-}
-
-#[derive(Clone, Copy, Eq)]
-struct VertexKey([u64; 3]);
-
-impl From<Vec3> for VertexKey {
-    fn from(position: Vec3) -> Self {
-        fn normalized_bits(value: f64) -> u64 {
-            if value == 0.0 {
-                0
-            } else {
-                value.to_bits()
-            }
-        }
-
-        Self([
-            normalized_bits(position.x),
-            normalized_bits(position.y),
-            normalized_bits(position.z),
-        ])
-    }
-}
-
-impl PartialEq for VertexKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl Hash for VertexKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
+    Analysis {
+        bounds,
+        slivers,
+        micro_triangles,
+        large_triangles,
+        high_incident_vertices,
     }
 }
